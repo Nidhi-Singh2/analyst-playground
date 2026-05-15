@@ -1,15 +1,16 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   BarChart, Bar, LineChart, Line, ComposedChart,
-  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  Cell, PieChart, Pie,
+  XAxis, YAxis, ZAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  Cell, PieChart, Pie, ScatterChart, Scatter, ReferenceLine,
 } from "recharts";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SKILL DIMENSIONS — every question is tagged. Adaptive engine maintains
 // an ability estimate per skill and selects next items accordingly.
 // ═══════════════════════════════════════════════════════════════════════════
-const SKILLS = {
+// General finance skills (used in "General" mode)
+const GENERAL_SKILLS = {
   TREND: "Trend Reading",
   GROWTH: "Growth & CAGR",
   MARGIN: "Margin Analysis",
@@ -23,7 +24,35 @@ const SKILLS = {
   WORKING_CAP: "Working Capital",
   VALUATION: "Valuation Multiples",
 };
-const SKILL_LIST = Object.values(SKILLS);
+
+// Airline revenue management skills (used in "Airline" mode)
+const AIRLINE_SKILLS = {
+  BOOKING_CURVE: "Booking Curve Reading",
+  PACING: "Pacing Analysis",
+  LF_YIELD: "Load Factor / Yield Trade-off",
+  FARE_MIX: "Fare Class Mix",
+  COMP_FARE: "Competitive Fare Action",
+  GAME_THEORY: "Competitive Game Theory",
+  RASM: "RASM / Unit Revenue",
+  FORECAST: "Demand Forecasting",
+  CAPACITY: "Capacity & Schedule",
+  VARIANCE_AIR: "Variance Attribution (RM)",
+  SEGMENTATION: "Market Segmentation",
+  OND_FLOW: "O&D vs Flow Traffic",
+  ELASTICITY: "Elasticity / Willingness-to-Pay",
+  OVERBOOK: "Overbooking & Spoilage",
+  SEASONALITY: "Day-of-Week / Seasonality",
+  TREND_AIR: "Trend Reading (Airline)",
+  ANOMALY_AIR: "Anomaly Detection (Airline)",
+};
+
+// Backward-compat alias used throughout the file by existing generators
+const SKILLS = GENERAL_SKILLS;
+const SKILL_LIST = Object.values(GENERAL_SKILLS);
+const AIRLINE_SKILL_LIST = Object.values(AIRLINE_SKILLS);
+
+// Helpers to get the right skill set for a mode
+const skillsForMode = (mode) => mode === "airline" ? AIRLINE_SKILL_LIST : SKILL_LIST;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ADAPTIVE ENGINE — simplified Elo / IRT hybrid.
@@ -31,14 +60,24 @@ const SKILL_LIST = Object.values(SKILLS);
 // Next-test selection biases toward weakest skills; difficulty targets
 // slightly above current ability to drive growth.
 // ═══════════════════════════════════════════════════════════════════════════
-const DEFAULT_PROFILE = () => ({
-  ability: Object.fromEntries(SKILL_LIST.map((s) => [s, 0.4])),
-  attempts: Object.fromEntries(SKILL_LIST.map((s) => [s, 0])),
-  correct: Object.fromEntries(SKILL_LIST.map((s) => [s, 0])),
-  testsToday: 0,
-  testsDate: new Date().toISOString().slice(0, 10),
+// Per-mode profile: ability/attempts/correct keyed by skill in that mode
+const makeModeProfile = (skillList) => ({
+  ability: Object.fromEntries(skillList.map((s) => [s, 0.4])),
+  attempts: Object.fromEntries(skillList.map((s) => [s, 0])),
+  correct: Object.fromEntries(skillList.map((s) => [s, 0])),
   history: [],
 });
+
+const DEFAULT_PROFILE = () => ({
+  mode: "airline",
+  airlineProfile: makeModeProfile(AIRLINE_SKILL_LIST),
+  generalProfile: makeModeProfile(SKILL_LIST),
+  testsToday: 0,  // shared across both modes — caps total tests per day
+  testsDate: new Date().toISOString().slice(0, 10),
+});
+
+// Get the active per-mode profile from the top-level profile object
+const activeProfile = (p) => p.mode === "airline" ? p.airlineProfile : p.generalProfile;
 
 function updateAbility(profile, skills, correct, difficulty) {
   const updated = {
@@ -531,6 +570,587 @@ function genValuationComps(rng, difficulty) {
   };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// AIRLINE CHART GENERATORS — Revenue Management focused
+// Each tests one or more airline RM skills with realistic data patterns.
+// Explanations teach the *why* alongside the math.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const ROUTES = [
+  ["DFW", "LAX"], ["DFW", "ORD"], ["DFW", "MIA"], ["DFW", "JFK"],
+  ["CLT", "PHX"], ["CLT", "BOS"], ["PHL", "DEN"], ["ORD", "SFO"],
+  ["MIA", "LGA"], ["LAX", "SEA"], ["DFW", "DEN"], ["DCA", "DFW"],
+];
+const CARRIERS = ["AA", "DL", "UA", "B6", "WN"];
+
+// 1. BOOKING CURVE — cumulative bookings vs days-to-departure, with forecast & PY
+function genBookingCurve(rng, difficulty) {
+  const route = ROUTES[Math.floor(rng() * ROUTES.length)];
+  const capacity = 160 + Math.floor(rng() * 40);
+  // Days-to-departure (DTD) checkpoints
+  const dtdPoints = [60, 45, 30, 21, 14, 7, 3, 0];
+  // Build a realistic S-curve booking pattern: slow start, mid-curve acceleration, late surge
+  const buildCurve = (multiplier) => dtdPoints.map((dtd) => {
+    const progress = (60 - dtd) / 60;
+    // Sigmoid-ish curve typical of booking accumulation
+    const s = 1 / (1 + Math.exp(-(progress - 0.45) * 5));
+    return Math.round(capacity * 0.92 * s * multiplier);
+  });
+
+  // Pacing scenario chosen at random (ahead / behind / on-pace)
+  const scenario = rng() < 0.4 ? "ahead" : rng() < 0.6 ? "behind" : "on-pace";
+  const actualMult = scenario === "ahead" ? (1.12 + rng() * 0.08) :
+                     scenario === "behind" ? (0.82 + rng() * 0.08) :
+                     (0.97 + rng() * 0.04);
+
+  const forecast = buildCurve(1.0);
+  const priorYear = buildCurve(0.95 + rng() * 0.10);
+  const actual = buildCurve(actualMult);
+  // Actuals only known up to a "today" point — at DTD=14 in this scenario
+  const todayIdx = 4; // DTD 14
+  const data = dtdPoints.map((dtd, i) => ({
+    dtd: `T-${dtd}`,
+    forecast: forecast[i],
+    priorYear: priorYear[i],
+    actual: i <= todayIdx ? actual[i] : null,
+  }));
+
+  const todayActual = actual[todayIdx];
+  const todayForecast = forecast[todayIdx];
+  const pacingDelta = round(((todayActual - todayForecast) / todayForecast) * 100, 1);
+  const finalActualEst = Math.round(actual[7]);
+  const finalForecast = forecast[7];
+
+  return {
+    type: "bookingCurve",
+    data,
+    todayIdx,
+    meta: {
+      title: `${route[0]}–${route[1]} — Booking Curve, Flight 1247`,
+      subtitle: `Capacity ${capacity}. Cumulative bookings by days-to-departure vs forecast and prior year.`,
+    },
+    questions: [
+      {
+        prompt: `At T-14, where is the flight pacing relative to forecast?`,
+        opts: makeOpts(rng,
+          pacingDelta > 5 ? `Ahead of forecast by ~${Math.abs(pacingDelta)}%` :
+          pacingDelta < -5 ? `Behind forecast by ~${Math.abs(pacingDelta)}%` :
+          `Approximately on pace`,
+          [
+            pacingDelta > 5 ? `Behind forecast by ~${Math.abs(pacingDelta)}%` : `Ahead of forecast by ~${Math.abs(pacingDelta + 8)}%`,
+            "Exactly matching prior year",
+            `${pacingDelta > 0 ? "Behind" : "Ahead"} by ~${Math.abs(pacingDelta) + 6}%`,
+          ]),
+        skills: [AIRLINE_SKILLS.BOOKING_CURVE, AIRLINE_SKILLS.PACING],
+        difficulty,
+        explain: `At T-14, actual bookings of ${todayActual} compared to forecast of ${todayForecast} = ${pacingDelta >= 0 ? "+" : ""}${pacingDelta}%. ` +
+          (pacingDelta > 5
+            ? "When a flight is pacing significantly ahead, demand is stronger than expected. The right action is usually to close down lower fare classes (K, L, Q, V) to push the remaining demand into higher buckets — this is exactly what bid-price optimization captures."
+            : pacingDelta < -5
+            ? "When a flight is pacing significantly behind, the forecast was too optimistic or demand softened. Options: open lower fare classes to stimulate bookings, run a targeted promotion, or reduce capacity if there's still time."
+            : "On-pace bookings mean the forecast is well-calibrated and the current bid-price strategy is appropriate. No corrective action needed."),
+      },
+      {
+        prompt: pacingDelta > 5
+          ? "Given this pacing, which action would a revenue manager most likely take?"
+          : pacingDelta < -5
+          ? "Given this pacing, which action would a revenue manager most likely take?"
+          : "Given this pacing pattern, what is the most appropriate action?",
+        opts: makeOpts(rng,
+          pacingDelta > 5 ? "Close down lower fare classes (K, L, Q) to push demand into higher buckets" :
+          pacingDelta < -5 ? "Open lower fare classes and consider a targeted promotion" :
+          "Maintain current inventory controls; the forecast is well-calibrated",
+          [
+            "Add capacity by swapping to a larger aircraft",
+            "Match the lowest competitor fare immediately",
+            "Wait until T-7 before any action is warranted",
+          ]),
+        skills: [AIRLINE_SKILLS.BOOKING_CURVE, AIRLINE_SKILLS.PACING, AIRLINE_SKILLS.FARE_MIX],
+        difficulty,
+        explain: pacingDelta > 5
+          ? "Strong pacing = strong demand at current prices, which means there's willingness-to-pay being left on the table. Closing lower classes raises the effective price for remaining buyers. Capacity changes are too costly at T-14; matching competitors is the opposite of what the data suggests."
+          : pacingDelta < -5
+          ? "Weak pacing means the forecast over-estimated demand or the price is too high for what the market will bear. Opening lower classes recovers some bookings without a wholesale price drop. Targeted promos help on specific corporate or leisure segments."
+          : "On-pace = current strategy is working. Avoid changes that introduce noise. Premature action is one of the most common RM mistakes.",
+      },
+    ],
+  };
+}
+
+// 2. LF vs YIELD SCATTER — markets plotted; identify over-discounting, opportunity, etc.
+function genLfYieldScatter(rng, difficulty) {
+  const markets = [];
+  const archetypes = [
+    { name: "Over-discounted", lf: [88, 96], yield: [12, 16], code: "over" },
+    { name: "Optimized", lf: [82, 90], yield: [18, 24], code: "opt" },
+    { name: "Premium / under-utilized", lf: [62, 74], yield: [24, 32], code: "prem" },
+    { name: "Weak demand", lf: [55, 68], yield: [11, 15], code: "weak" },
+  ];
+  // Generate 2-3 markets per archetype
+  archetypes.forEach((arch) => {
+    const count = 2 + Math.floor(rng() * 2);
+    for (let i = 0; i < count; i++) {
+      const route = ROUTES[Math.floor(rng() * ROUTES.length)];
+      markets.push({
+        name: `${route[0]}-${route[1]}`,
+        lf: round(arch.lf[0] + rng() * (arch.lf[1] - arch.lf[0]), 1),
+        yield: round(arch.yield[0] + rng() * (arch.yield[1] - arch.yield[0]), 1),
+        archetype: arch.code,
+        unitRev: 0,
+      });
+    }
+  });
+  markets.forEach((m) => { m.unitRev = round(m.lf * m.yield / 100, 2); });
+
+  // Pick one market that's clearly over-discounted for the question
+  const overDiscounted = markets.find((m) => m.archetype === "over");
+  const premium = markets.find((m) => m.archetype === "prem");
+  const weak = markets.find((m) => m.archetype === "weak");
+
+  return {
+    type: "lfYieldScatter",
+    data: markets,
+    meta: {
+      title: "Domestic Markets — Load Factor vs Yield",
+      subtitle: "Each point is one O&D. Identify markets by their position in the LF × Yield space.",
+    },
+    questions: [
+      {
+        prompt: "Which market shows the clearest signs of over-discounting?",
+        opts: makeOpts(rng, overDiscounted.name,
+          [premium.name, weak.name, markets.find((m) => m.archetype === "opt").name]),
+        skills: [AIRLINE_SKILLS.LF_YIELD, AIRLINE_SKILLS.RASM],
+        difficulty,
+        explain: `${overDiscounted.name} shows ${overDiscounted.lf}% load factor with only $${overDiscounted.yield} yield. High LF + low yield is the signature of over-discounting — the planes are full but you're leaving money on the table. The fix is to gradually close lower fare classes and let LF fall slightly while yield rises. Premium markets like ${premium.name} (${premium.lf}% LF, $${premium.yield} yield) are the opposite — there's room to fill more seats without crushing price.`,
+      },
+      {
+        prompt: `Which market most clearly suggests an opportunity to grow load factor with limited yield risk?`,
+        opts: makeOpts(rng, premium.name,
+          [overDiscounted.name, weak.name, markets[markets.length - 1].name]),
+        skills: [AIRLINE_SKILLS.LF_YIELD, AIRLINE_SKILLS.ELASTICITY],
+        difficulty,
+        explain: `${premium.name} has ${premium.lf}% LF and $${premium.yield} yield — high yield with empty seats. This profile suggests price-sensitive demand at the margin: a modest opening of lower fare classes can fill seats without significantly cannibalizing existing high-yield bookings. Markets like ${weak.name} (low on both axes) are riskier — weak demand at any price.`,
+      },
+    ],
+  };
+}
+
+// 3. FARE CLASS MIX — stacked bar of class distribution
+function genFareClassMix(rng, difficulty) {
+  const route = ROUTES[Math.floor(rng() * ROUTES.length)];
+  const flightType = rng() > 0.5 ? "business" : "leisure";
+  // Business-heavy mix: more Y, B, M; leisure-heavy mix: more K, L, Q, V
+  const generateMix = () => {
+    if (flightType === "business") {
+      const Y = 8 + rng() * 6, B = 14 + rng() * 6, M = 22 + rng() * 8, H = 18 + rng() * 6;
+      const K = 14 + rng() * 6, L = 10 + rng() * 4, Q = 8 + rng() * 4;
+      const total = Y + B + M + H + K + L + Q;
+      return [
+        { class: "Y", pct: round((Y / total) * 100, 1), color: "#c45a3e" },
+        { class: "B", pct: round((B / total) * 100, 1), color: "#d4a857" },
+        { class: "M", pct: round((M / total) * 100, 1), color: "#7a8b5c" },
+        { class: "H", pct: round((H / total) * 100, 1), color: "#5a7287" },
+        { class: "K", pct: round((K / total) * 100, 1), color: "#a89060" },
+        { class: "L", pct: round((L / total) * 100, 1), color: "#8a8474" },
+        { class: "Q", pct: round((Q / total) * 100, 1), color: "#6b6356" },
+      ];
+    } else {
+      const Y = 3 + rng() * 3, B = 5 + rng() * 4, M = 10 + rng() * 5, H = 12 + rng() * 5;
+      const K = 22 + rng() * 8, L = 24 + rng() * 8, Q = 16 + rng() * 6, V = 8 + rng() * 4;
+      const total = Y + B + M + H + K + L + Q + V;
+      return [
+        { class: "Y", pct: round((Y / total) * 100, 1), color: "#c45a3e" },
+        { class: "B", pct: round((B / total) * 100, 1), color: "#d4a857" },
+        { class: "M", pct: round((M / total) * 100, 1), color: "#7a8b5c" },
+        { class: "H", pct: round((H / total) * 100, 1), color: "#5a7287" },
+        { class: "K", pct: round((K / total) * 100, 1), color: "#a89060" },
+        { class: "L", pct: round((L / total) * 100, 1), color: "#8a8474" },
+        { class: "Q", pct: round((Q / total) * 100, 1), color: "#6b6356" },
+        { class: "V", pct: round((V / total) * 100, 1), color: "#4a443a" },
+      ];
+    }
+  };
+  const data = generateMix();
+  const highYieldShare = round(data.filter((d) => ["Y", "B", "M"].includes(d.class)).reduce((a, b) => a + b.pct, 0), 1);
+  const deepDiscShare = round(data.filter((d) => ["L", "Q", "V"].includes(d.class)).reduce((a, b) => a + b.pct, 0), 1);
+
+  return {
+    type: "fareClassMix",
+    data,
+    meta: {
+      title: `${route[0]}–${route[1]} — Fare Class Mix (last 30 days)`,
+      subtitle: "Share of bookings by fare class. Y is full-fare, V is the deepest discount.",
+    },
+    questions: [
+      {
+        prompt: "What does this fare class mix most strongly suggest about the demand profile?",
+        opts: makeOpts(rng,
+          flightType === "business"
+            ? "Predominantly business / corporate demand with healthy yield"
+            : "Predominantly leisure demand with significant deep-discount share",
+          [
+            flightType === "business"
+              ? "Leisure-dominant route relying on deep discounts"
+              : "Business-dominant route with strong yield",
+            "Mix is unusual; likely a data issue with the booking system",
+            "Mix is balanced and suggests no clear segment dominance",
+          ]),
+        skills: [AIRLINE_SKILLS.FARE_MIX, AIRLINE_SKILLS.SEGMENTATION],
+        difficulty,
+        explain: flightType === "business"
+          ? `High-yield classes (Y/B/M) hold ${highYieldShare}% of bookings here, with limited deep-discount share. This is the classic profile of a business market — corporate travelers booking close-in, less price-sensitive. Examples: DFW-LGA, DFW-ORD weekday flights. Pricing strategy emphasizes high last-seat value rather than fill rates.`
+          : `Deep-discount classes (L/Q/V) make up ${deepDiscShare}% of bookings. This is a leisure-heavy mix — long booking windows, price-sensitive customers. Typical of Florida/Caribbean/Vegas routes. Strategy emphasizes fill rate via low-priced inventory opened well in advance, with revenue from ancillaries and aircraft utilization.`,
+      },
+      {
+        prompt: flightType === "business"
+          ? "If you saw L/Q share suddenly rise on this route, what would you investigate first?"
+          : "If you saw Y/B share suddenly rise on this route, what would you investigate first?",
+        opts: makeOpts(rng,
+          flightType === "business"
+            ? "Whether competitive pressure or weak corporate demand is forcing dilution"
+            : "Whether a new event, sports team travel, or business demand surge is occurring",
+          [
+            "Whether the aircraft type changed",
+            "Whether fuel costs rose",
+            "Whether the schedule was rebanked",
+          ]),
+        skills: [AIRLINE_SKILLS.FARE_MIX, AIRLINE_SKILLS.ANOMALY_AIR],
+        difficulty,
+        explain: flightType === "business"
+          ? `A sudden rise in deep-discount share on a business route usually signals one of three things: (1) competitors dropped fares, forcing you to open lower buckets defensively, (2) the corporate demand base weakened — recession, RTO policy change, (3) a sales/promo was active. The right diagnostic order is to check competitive fare actions first, then look at corporate booking trends.`
+          : `A surge in high-yield bookings on a leisure route usually signals an exogenous demand spike: a major event (concert, sports playoff, convention), seasonal shift, or sometimes weather disruption rerouting passengers. The action is usually to close down lower classes immediately while the spike lasts.`,
+      },
+    ],
+  };
+}
+
+// 4. COMPETITIVE FARE LADDER — table of fares by class across carriers
+function genCompetitiveFareLadder(rng, difficulty) {
+  const route = ROUTES[Math.floor(rng() * ROUTES.length)];
+  const carriers = shuffle(rng, [...CARRIERS]).slice(0, 4);
+  if (!carriers.includes("AA")) carriers[0] = "AA";
+  const classes = ["Y", "B", "M", "H", "K", "L"];
+  const basePrice = [580, 440, 340, 260, 190, 140];
+
+  const data = carriers.map((c, i) => ({
+    carrier: c,
+    fares: classes.map((cl, j) => {
+      const variance = c === "AA" ? 0 : (rng() - 0.5) * 0.18;
+      return Math.round(basePrice[j] * (1 + variance));
+    }),
+  }));
+
+  // Find AA's biggest gap (where it's most overpriced vs lowest competitor)
+  const aaRow = data.find((d) => d.carrier === "AA");
+  let worstClass = "M", worstGap = 0;
+  classes.forEach((cl, j) => {
+    const competitors = data.filter((d) => d.carrier !== "AA").map((d) => d.fares[j]);
+    const minComp = Math.min(...competitors);
+    const gap = aaRow.fares[j] - minComp;
+    if (gap > worstGap) { worstGap = gap; worstClass = cl; }
+  });
+
+  return {
+    type: "competitiveFareLadder",
+    data,
+    classes,
+    meta: {
+      title: `${route[0]}–${route[1]} — Competitive Fare Ladder`,
+      subtitle: "One-way fares by booking class across carriers. AA's position in each bucket.",
+    },
+    questions: [
+      {
+        prompt: "In which fare class is AA most uncompetitive?",
+        opts: makeOpts(rng, `${worstClass} class`,
+          classes.filter((c) => c !== worstClass).slice(0, 3).map((c) => `${c} class`)),
+        skills: [AIRLINE_SKILLS.COMP_FARE, AIRLINE_SKILLS.GAME_THEORY],
+        difficulty,
+        explain: `In ${worstClass} class, AA is priced $${worstGap} above the lowest competitor. In RM, the most price-sensitive shoppers cluster in mid-to-deep discount classes — a $${worstGap} gap in ${worstClass} drives meaningful share loss because those shoppers compare prices aggressively on metasearch. Top-of-ladder classes (Y, B) see less price-comparison shopping because corporate travelers book based on schedule and account agreements, not lowest fare.`,
+      },
+      {
+        prompt: "What's the most strategically sound response to this competitive position?",
+        opts: makeOpts(rng,
+          `Match in ${worstClass} class only, narrowly targeted, to avoid triggering a broader fare war`,
+          [
+            "Match the lowest competitor across all classes immediately",
+            "Hold prices firm; AA's brand justifies the premium",
+            "Raise fares across the board to signal market discipline",
+          ]),
+        skills: [AIRLINE_SKILLS.COMP_FARE, AIRLINE_SKILLS.GAME_THEORY],
+        difficulty,
+        explain: `Targeted matches in specific classes minimize revenue dilution while addressing the actual loss point. Wholesale matching invites retaliation and triggers fare wars that hurt all carriers. Holding firm assumes brand loyalty that doesn't typically survive a $${worstGap} gap on metasearch. Raising fares signals discipline only if you have market power; on a competitive route this just accelerates share loss. The textbook RM move is narrow, surgical fare adjustments — and ideally to match using fare restrictions (advance purchase, Saturday stay) that segment business from leisure.`,
+      },
+    ],
+  };
+}
+
+// 5. RASM BRIDGE — variance bridge: PY RASM → CY RASM with airline-specific drivers
+function genRasmBridge(rng, difficulty) {
+  const startRasm = round(11 + rng() * 4, 2);
+  const yieldImpact = round((rng() - 0.4) * 1.2, 2);
+  const lfImpact = round((rng() - 0.5) * 0.9, 2);
+  const mixImpact = round((rng() - 0.5) * 0.6, 2);
+  const stageLength = round((rng() - 0.5) * 0.4, 2);
+  const fuelSurcharge = round((rng() - 0.5) * 0.3, 2);
+  const endRasm = round(startRasm + yieldImpact + lfImpact + mixImpact + stageLength + fuelSurcharge, 2);
+
+  const items = [
+    { label: "PY RASM", value: startRasm, type: "start" },
+    { label: "Yield", value: yieldImpact, type: yieldImpact >= 0 ? "in" : "out" },
+    { label: "Load Factor", value: lfImpact, type: lfImpact >= 0 ? "in" : "out" },
+    { label: "Fare Mix", value: mixImpact, type: mixImpact >= 0 ? "in" : "out" },
+    { label: "Stage Length", value: stageLength, type: stageLength >= 0 ? "in" : "out" },
+    { label: "Fuel Surcharge", value: fuelSurcharge, type: fuelSurcharge >= 0 ? "in" : "out" },
+    { label: "CY RASM", value: endRasm, type: "end" },
+  ];
+  let running = 0;
+  const data = items.map((d) => {
+    if (d.type === "start" || d.type === "end") {
+      running = d.value;
+      return { ...d, base: 0, bar: d.value };
+    }
+    const start = running;
+    running += d.value;
+    return { ...d, base: Math.min(start, running), bar: Math.abs(d.value) };
+  });
+
+  const movables = items.filter((d) => !["start", "end"].includes(d.type));
+  const largestDriver = movables.reduce((a, b) => Math.abs(b.value) > Math.abs(a.value) ? b : a);
+  const netDelta = round(endRasm - startRasm, 2);
+
+  return {
+    type: "rasmBridge",
+    data,
+    meta: {
+      title: "Domestic Mainline — RASM Walk YoY",
+      subtitle: "Drivers of unit revenue change ($ per ASM). RASM = Revenue ÷ Available Seat Miles.",
+    },
+    questions: [
+      {
+        prompt: "Which factor contributed most to the YoY RASM change?",
+        opts: makeOpts(rng, largestDriver.label,
+          movables.filter((m) => m.label !== largestDriver.label).slice(0, 3).map((m) => m.label)),
+        skills: [AIRLINE_SKILLS.RASM, AIRLINE_SKILLS.VARIANCE_AIR],
+        difficulty,
+        explain: `${largestDriver.label} moved RASM by ${largestDriver.value >= 0 ? "+" : ""}$${largestDriver.value}. ` +
+          (largestDriver.label === "Yield" ? "Yield is revenue per passenger-mile — changes typically reflect pricing actions, fare class mix, or competitive moves." :
+           largestDriver.label === "Load Factor" ? "Load factor moves RASM by spreading the same flight costs across more (or fewer) passengers. A 1-pt LF gain is roughly a 1-pt RASM gain at constant yield." :
+           largestDriver.label === "Stage Length" ? "Stage length is a denominator effect — longer flights have more ASMs per passenger, mechanically lowering RASM even at constant revenue. Always normalize for stage length when comparing carriers or periods." :
+           largestDriver.label === "Fare Mix" ? "Mix shift between fare classes (or domestic vs international, or main cabin vs premium) changes the effective price even when posted fares are unchanged." :
+           "Fuel surcharges historically passed through to fares; less common now in domestic but still relevant internationally."),
+      },
+      {
+        prompt: `Net RASM change was ${netDelta >= 0 ? "+" : ""}$${netDelta}. What does this tell you about commercial performance?`,
+        opts: makeOpts(rng,
+          netDelta > 0.3 ? "Strong commercial performance: pricing and demand both contributing positively" :
+          netDelta < -0.3 ? "Commercial pressure: investigate whether pricing power eroded or demand softened" :
+          "RASM is essentially flat YoY — neutral commercial trajectory",
+          [
+            "RASM movement doesn't reveal commercial performance; need CASM data",
+            netDelta > 0 ? "Performance is weak; need fuel data to interpret" : "Performance is strong; capacity expansion is working",
+            "Movement is driven entirely by stage length",
+          ]),
+        skills: [AIRLINE_SKILLS.RASM, AIRLINE_SKILLS.VARIANCE_AIR],
+        difficulty,
+        explain: `RASM is the cleanest single measure of commercial performance because it normalizes for capacity. PRASM (Passenger RASM) excludes cargo. ${netDelta > 0.3 ? "A meaningful RASM increase signals real revenue strength — though always check CASM separately to confirm margin improved too." : netDelta < -0.3 ? "A meaningful RASM decline is a red flag. The bridge tells you which driver to chase: was it pricing (yield) or volume (LF)? Different fixes." : "Flat RASM means the company is roughly running in place commercially. Often masks offsetting moves worth understanding."}`,
+      },
+    ],
+  };
+}
+
+// 6. DEMAND FORECAST vs ACTUALS — line chart over flight dates
+function genForecastActuals(rng, difficulty) {
+  const route = ROUTES[Math.floor(rng() * ROUTES.length)];
+  const days = 14;
+  // Forecast bias direction: forecast systematically over or under
+  const bias = rng() > 0.5 ? "over" : "under";
+  const biasMag = 0.06 + rng() * 0.08;
+  const data = Array.from({ length: days }, (_, i) => {
+    const dow = i % 7;
+    // Weekend lift typical of leisure routes
+    const dowMult = (dow === 5 || dow === 6) ? 1.12 : (dow === 1 || dow === 2) ? 0.92 : 1.0;
+    const base = 130 + rng() * 30;
+    const forecast = Math.round(base * dowMult);
+    const actualMult = bias === "over" ? (1 - biasMag) : (1 + biasMag);
+    const noise = (rng() - 0.5) * 0.06;
+    const actual = Math.round(forecast * (actualMult + noise));
+    return {
+      day: `D${i + 1}`,
+      forecast,
+      actual,
+      delta: actual - forecast,
+    };
+  });
+  const avgBias = round(data.reduce((s, d) => s + d.delta, 0) / data.length, 1);
+  const totalForecast = data.reduce((s, d) => s + d.forecast, 0);
+  const biasPct = round((avgBias * data.length / totalForecast) * 100, 1);
+
+  return {
+    type: "forecastActuals",
+    data,
+    meta: {
+      title: `${route[0]}–${route[1]} — Demand Forecast vs Actuals (last 14 flights)`,
+      subtitle: "Forecasted passenger demand and actual bookings by flight date.",
+    },
+    questions: [
+      {
+        prompt: "What pattern does this forecast exhibit?",
+        opts: makeOpts(rng,
+          bias === "over" ? `Systematically over-forecasting by ~${Math.abs(biasPct)}%`
+                          : `Systematically under-forecasting by ~${Math.abs(biasPct)}%`,
+          [
+            bias === "over" ? `Systematically under-forecasting by ~${Math.abs(biasPct)}%`
+                            : `Systematically over-forecasting by ~${Math.abs(biasPct)}%`,
+            "Random noise around an unbiased forecast",
+            "Forecast is accurate; deviations are purely seasonal",
+          ]),
+        skills: [AIRLINE_SKILLS.FORECAST, AIRLINE_SKILLS.ANOMALY_AIR],
+        difficulty,
+        explain: `Average actual minus forecast is ${avgBias > 0 ? "+" : ""}${avgBias} passengers per flight (${biasPct >= 0 ? "+" : ""}${biasPct}%). ` +
+          (bias === "over"
+            ? "Over-forecasting demand means the system is holding too tight on inventory — closing fare classes too early, leaving seats unsold (spoilage). Fix: re-train the forecast on recent data, or apply a downward bias correction in the bid-price engine."
+            : "Under-forecasting means inventory is being released too freely — selling too many low-fare seats early when higher-paying customers would arrive later (revenue dilution). Fix: raise the demand parameters in the forecast or apply an upward bias adjustment."),
+      },
+      {
+        prompt: bias === "over"
+          ? "What is the operational consequence of persistent over-forecasting?"
+          : "What is the operational consequence of persistent under-forecasting?",
+        opts: makeOpts(rng,
+          bias === "over"
+            ? "Excessive spoilage — seats unsold that could have been sold"
+            : "Revenue dilution — too many low-fare bookings before high-yield demand arrives",
+          [
+            bias === "over"
+              ? "Revenue dilution from selling too many cheap seats"
+              : "Excessive spoilage from holding inventory too tight",
+            "Higher fuel costs",
+            "No operational impact",
+          ]),
+        skills: [AIRLINE_SKILLS.FORECAST, AIRLINE_SKILLS.OVERBOOK],
+        difficulty,
+        explain: bias === "over"
+          ? "When the forecast says 'lots of high-paying demand is coming', the optimizer reserves more seats for higher fare classes — but that demand never materializes, so those seats fly empty. This is spoilage, the single biggest forecast-related revenue leak in RM."
+          : "When the forecast underestimates demand, the optimizer thinks 'we won't sell many high-fare tickets, better fill seats now with discounts.' Then high-yield bookings show up but inventory is gone. This is dilution — the second-biggest forecast-related leak.",
+      },
+    ],
+  };
+}
+
+// 7. CAPACITY & SCHEDULE — bar chart of ASMs deployed by route with YoY change
+function genCapacitySchedule(rng, difficulty) {
+  const routes = shuffle(rng, ROUTES).slice(0, 6).map((r) => `${r[0]}-${r[1]}`);
+  const data = routes.map((r) => {
+    const py = 60 + rng() * 100;
+    const change = (rng() - 0.4) * 0.3; // skewed to growth
+    const cy = py * (1 + change);
+    return {
+      route: r,
+      py: round(py, 0),
+      cy: round(cy, 0),
+      change: round(change * 100, 1),
+    };
+  });
+  const biggestAdd = data.reduce((a, b) => b.change > a.change ? b : a);
+  const biggestCut = data.reduce((a, b) => b.change < a.change ? b : a);
+
+  return {
+    type: "capacitySchedule",
+    data,
+    meta: {
+      title: "Capacity Deployed by Route — YoY (ASMs in millions)",
+      subtitle: "Available Seat Miles by route: current year vs prior year.",
+    },
+    questions: [
+      {
+        prompt: "On which route did AA add the most capacity YoY?",
+        opts: makeOpts(rng, biggestAdd.route,
+          data.filter((d) => d.route !== biggestAdd.route).slice(0, 3).map((d) => d.route)),
+        skills: [AIRLINE_SKILLS.CAPACITY, AIRLINE_SKILLS.RASM],
+        difficulty,
+        explain: `${biggestAdd.route} grew ${biggestAdd.change > 0 ? "+" : ""}${biggestAdd.change}% YoY in ASMs. Capacity adds are usually one of: (1) responding to demand strength, (2) defending share against a competitor entering, (3) hub densification. The RM question that follows is always: is the demand growth keeping up? If unit revenue (RASM) falls more than the capacity grew, dilution is happening.`,
+      },
+      {
+        prompt: `${biggestAdd.route} added ${biggestAdd.change}% capacity. What is the most important follow-up metric?`,
+        opts: makeOpts(rng, "RASM YoY — did unit revenue hold up?",
+          [
+            "Fuel cost per ASM",
+            "Number of pilots assigned",
+            "Schedule reliability (D0)",
+          ]),
+        skills: [AIRLINE_SKILLS.CAPACITY, AIRLINE_SKILLS.RASM],
+        difficulty,
+        explain: `Capacity adds are only economically sound if RASM holds (or declines less than the capacity grew). If RASM falls 10% while capacity grew 15%, total revenue is up ~3.5% — possibly fine, possibly not, depending on costs. If RASM falls 20% on a 15% capacity add, the add was destructive. RM teams obsessively track RASM on newly-grown markets for this reason.`,
+      },
+    ],
+  };
+}
+
+// 8. ROUTE PROFITABILITY QUADRANT — 2×2 with revenue growth × LF, bubble size = ASMs
+function genRouteQuadrant(rng, difficulty) {
+  const routes = shuffle(rng, ROUTES).slice(0, 8);
+  // Distribute into quadrants: star (high growth, high LF), question (high growth, low LF),
+  //                            cash cow (low growth, high LF), dog (low growth, low LF)
+  const archetypes = ["star", "question", "cow", "dog"];
+  const data = routes.map((r, i) => {
+    const arch = archetypes[i % 4];
+    const revGrowth = arch === "star" || arch === "question" ? 8 + rng() * 12 : -4 + rng() * 8;
+    const lf = arch === "star" || arch === "cow" ? 82 + rng() * 12 : 60 + rng() * 18;
+    const asms = 40 + rng() * 120;
+    return {
+      route: `${r[0]}-${r[1]}`,
+      revGrowth: round(revGrowth, 1),
+      lf: round(lf, 1),
+      asms: round(asms, 0),
+      archetype: arch,
+    };
+  });
+  const star = data.find((d) => d.archetype === "star");
+  const dog = data.find((d) => d.archetype === "dog");
+
+  return {
+    type: "routeQuadrant",
+    data,
+    meta: {
+      title: "Route Portfolio — Revenue Growth × Load Factor",
+      subtitle: "Each bubble is one O&D. Bubble size = ASMs deployed.",
+    },
+    questions: [
+      {
+        prompt: "Which route would you de-emphasize first based on this portfolio view?",
+        opts: makeOpts(rng, dog.route,
+          data.filter((d) => d.route !== dog.route).slice(0, 3).map((d) => d.route)),
+        skills: [AIRLINE_SKILLS.CAPACITY, AIRLINE_SKILLS.LF_YIELD],
+        difficulty,
+        explain: `${dog.route} shows ${dog.revGrowth}% revenue growth and only ${dog.lf}% LF — weak on both dimensions. This is the textbook "dog" quadrant: capital tied up earning poor returns. Before cutting, check (1) network value (does it feed a hub?), (2) competitive considerations (does pulling out invite entry?), (3) seasonality (is the trough temporary?). But absent those, this is the candidate for capacity reduction.`,
+      },
+      {
+        prompt: `${star.route} shows high growth and high LF. What's the most likely RM action?`,
+        opts: makeOpts(rng,
+          "Hold capacity steady but close lower fare classes to harvest higher yield",
+          [
+            "Cut capacity to push yield even higher",
+            "Add capacity aggressively to capture share",
+            "Match competitor fares to defend share",
+          ]),
+        skills: [AIRLINE_SKILLS.CAPACITY, AIRLINE_SKILLS.LF_YIELD, AIRLINE_SKILLS.ELASTICITY],
+        difficulty,
+        explain: `Star routes (high growth, high LF) have demand exceeding supply at current prices. The yield-maximizing move is to close lower fare buckets, push customers into higher classes, and let total revenue rise more than total bookings. Adding capacity is tempting but risks dilution if the demand surge is temporary; cutting capacity gives up revenue. The RM answer is almost always: optimize the existing inventory before changing capacity.`,
+      },
+    ],
+  };
+}
+
+const AIRLINE_GENERATORS = [
+  { gen: genBookingCurve, skills: [AIRLINE_SKILLS.BOOKING_CURVE, AIRLINE_SKILLS.PACING] },
+  { gen: genLfYieldScatter, skills: [AIRLINE_SKILLS.LF_YIELD, AIRLINE_SKILLS.RASM, AIRLINE_SKILLS.ELASTICITY] },
+  { gen: genFareClassMix, skills: [AIRLINE_SKILLS.FARE_MIX, AIRLINE_SKILLS.SEGMENTATION] },
+  { gen: genCompetitiveFareLadder, skills: [AIRLINE_SKILLS.COMP_FARE, AIRLINE_SKILLS.GAME_THEORY] },
+  { gen: genRasmBridge, skills: [AIRLINE_SKILLS.RASM, AIRLINE_SKILLS.VARIANCE_AIR] },
+  { gen: genForecastActuals, skills: [AIRLINE_SKILLS.FORECAST, AIRLINE_SKILLS.ANOMALY_AIR, AIRLINE_SKILLS.OVERBOOK] },
+  { gen: genCapacitySchedule, skills: [AIRLINE_SKILLS.CAPACITY, AIRLINE_SKILLS.RASM] },
+  { gen: genRouteQuadrant, skills: [AIRLINE_SKILLS.CAPACITY, AIRLINE_SKILLS.LF_YIELD] },
+];
+
 const CHART_GENERATORS = [
   { gen: genRevenueMargin, skills: [SKILLS.TREND, SKILLS.GROWTH, SKILLS.MARGIN] },
   { gen: genCashFlowBridge, skills: [SKILLS.CASHFLOW, SKILLS.COMPOSITION] },
@@ -543,27 +1163,141 @@ const CHART_GENERATORS = [
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TEST BUILDER — pick 3 charts biased toward weak skills; set difficulty
-// per current ability for the skills covered.
 // ═══════════════════════════════════════════════════════════════════════════
-function buildTest(profile, rng) {
-  const skillsRanked = SKILL_LIST
-    .map((s) => ({ skill: s, ability: profile.ability[s] }))
+// MENTAL MATH — Option C: inject 1-2 quick numerical questions into each test
+// These appear as a "mental math" mini-card between charts, no visualization.
+// Tagged with a synthetic skill so they don't affect skill-specific abilities.
+// ═══════════════════════════════════════════════════════════════════════════
+function genMentalMath(rng, mode) {
+  // Airline-flavored or general financial mental math
+  const airline = mode === "airline";
+  const variants = airline ? [
+    () => {
+      const seats = 150 + Math.floor(rng() * 70);
+      const lf = round(70 + rng() * 25, 0);
+      const fare = 180 + Math.floor(rng() * 200);
+      const paxes = Math.round(seats * lf / 100);
+      const rev = paxes * fare;
+      const distractors = [rev + 5000, rev - 4500, Math.round(rev * 1.15)];
+      return {
+        prompt: `A flight has ${seats} seats, ${lf}% load factor, and an average fare of $${fare}. What is approximate flight revenue?`,
+        correctText: `$${rev.toLocaleString()}`,
+        distractors: distractors.map((d) => `$${d.toLocaleString()}`),
+        explain: `Passengers = ${seats} × ${lf}% = ${paxes}. Revenue = ${paxes} × $${fare} = $${rev.toLocaleString()}. This is the fundamental RM calculation done dozens of times daily.`,
+        skill: AIRLINE_SKILLS.RASM,
+      };
+    },
+    () => {
+      const rev = 800 + Math.floor(rng() * 1200);
+      const asm = 90 + Math.floor(rng() * 60);
+      const rasm = round(rev / asm * 100, 2);  // cents
+      const distractors = [round(rasm + 0.8, 2), round(rasm - 0.6, 2), round(rasm * 1.4, 2)];
+      return {
+        prompt: `Revenue is $${rev}M and ASMs are ${asm}B. What is RASM (in cents per ASM)?`,
+        correctText: `${rasm}¢`,
+        distractors: distractors.map((d) => `${d}¢`),
+        explain: `RASM = Revenue ÷ ASMs. $${rev}M ÷ ${asm}B = $${rev/asm} per ASM = ${rasm}¢. RASM is the industry-standard unit revenue metric — keep the unit conversion (millions ÷ billions = 1/1000) at your fingertips.`,
+        skill: AIRLINE_SKILLS.RASM,
+      };
+    },
+    () => {
+      const seats = 160 + Math.floor(rng() * 60);
+      const overbook = 6 + Math.floor(rng() * 8);
+      const noShowRate = round(6 + rng() * 6, 0);
+      const expectedShow = Math.round((seats + overbook) * (1 - noShowRate / 100));
+      const denied = expectedShow - seats;
+      return {
+        prompt: `Capacity ${seats}, overbooked to ${seats + overbook} (${overbook} extras), no-show rate ${noShowRate}%. Expected denied boardings?`,
+        correctText: denied > 0 ? `~${denied}` : "0 (no denied boardings expected)",
+        distractors: [`~${denied + 3}`, `~${overbook}`, `~${Math.abs(denied - 2)}`],
+        explain: `Expected shows = (${seats} + ${overbook}) × (1 - ${noShowRate}%) = ${expectedShow}. Denied = ${expectedShow} - ${seats} = ${denied}. Overbooking is calibrated so denied boardings × DB compensation cost < spoilage saved by selling the extra seats.`,
+        skill: AIRLINE_SKILLS.OVERBOOK,
+      };
+    },
+    () => {
+      const yieldVal = round(15 + rng() * 8, 1);
+      const lf = round(78 + rng() * 14, 0);
+      const rasm = round(yieldVal * lf / 100, 2);
+      return {
+        prompt: `Yield is ${yieldVal}¢ and Load Factor is ${lf}%. What is RASM?`,
+        correctText: `${rasm}¢`,
+        distractors: [`${round(rasm + 1.2, 2)}¢`, `${round(rasm - 0.9, 2)}¢`, `${round(yieldVal, 2)}¢`],
+        explain: `RASM = Yield × LF. ${yieldVal}¢ × ${lf}% = ${rasm}¢. This is one of the most common identities in airline analytics — internalize it.`,
+        skill: AIRLINE_SKILLS.RASM,
+      };
+    },
+  ] : [
+    () => {
+      const rev = 200 + Math.floor(rng() * 800);
+      const margin = round(8 + rng() * 22, 0);
+      const ebitda = Math.round(rev * margin / 100);
+      return {
+        prompt: `Revenue is $${rev}M at ${margin}% EBITDA margin. What is EBITDA?`,
+        correctText: `$${ebitda}M`,
+        distractors: [`$${ebitda + 12}M`, `$${ebitda - 9}M`, `$${Math.round(ebitda * 1.2)}M`],
+        explain: `EBITDA = Revenue × Margin = $${rev}M × ${margin}% = $${ebitda}M.`,
+        skill: GENERAL_SKILLS.RATIO,
+      };
+    },
+    () => {
+      const ebitda = 50 + Math.floor(rng() * 200);
+      const mult = round(7 + rng() * 8, 1);
+      const ev = Math.round(ebitda * mult);
+      return {
+        prompt: `EBITDA of $${ebitda}M trading at ${mult}x. What is Enterprise Value?`,
+        correctText: `$${ev}M`,
+        distractors: [`$${ev + 80}M`, `$${ev - 50}M`, `$${Math.round(ev * 1.15)}M`],
+        explain: `EV = EBITDA × Multiple = $${ebitda}M × ${mult}x = $${ev}M.`,
+        skill: GENERAL_SKILLS.VALUATION,
+      };
+    },
+  ];
+  const variant = variants[Math.floor(rng() * variants.length)]();
+  return {
+    type: "mentalMath",
+    meta: {
+      title: "Rapid Calculation",
+      subtitle: "Quick mental math — the kind asked live in RM interviews.",
+    },
+    data: null,
+    questions: [{
+      prompt: variant.prompt,
+      opts: makeOpts(rng, variant.correctText, variant.distractors),
+      skills: [variant.skill],
+      difficulty: 0.5,
+      explain: variant.explain,
+    }],
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TEST BUILDER — pick 3 charts biased toward weak skills; set difficulty
+// per current ability for the skills covered. Adds 1-2 mental math questions.
+// ═══════════════════════════════════════════════════════════════════════════
+function buildTest(profile, rng, mode = "airline") {
+  const generators = mode === "airline" ? AIRLINE_GENERATORS : CHART_GENERATORS;
+  const skills = mode === "airline" ? AIRLINE_SKILL_LIST : SKILL_LIST;
+  const skillsRanked = skills
+    .map((s) => ({ skill: s, ability: profile.ability[s] || 0.4 }))
     .sort((a, b) => a.ability - b.ability);
   const weakSkills = new Set(skillsRanked.slice(0, 5).map((s) => s.skill));
 
-  const scored = CHART_GENERATORS.map((g, idx) => {
+  const scored = generators.map((g, idx) => {
     const overlap = g.skills.filter((s) => weakSkills.has(s)).length;
     return { idx, score: overlap + rng() * 0.4 };
   }).sort((a, b) => b.score - a.score);
 
   const chosenIdxs = scored.slice(0, 3).map((s) => s.idx);
-  return chosenIdxs.map((idx) => {
-    const skillAbilities = CHART_GENERATORS[idx].skills.map((s) => profile.ability[s]);
+  const charts = chosenIdxs.map((idx) => {
+    const skillAbilities = generators[idx].skills.map((s) => profile.ability[s] || 0.4);
     const avgAbility = skillAbilities.reduce((a, b) => a + b, 0) / skillAbilities.length;
     const diff = Math.min(0.95, Math.max(0.15, avgAbility + 0.1));
-    return CHART_GENERATORS[idx].gen(rng, diff);
+    return generators[idx].gen(rng, diff);
   });
+
+  // Inject one mental math card in the middle of the test
+  charts.splice(2, 0, genMentalMath(rng, mode));
+  return charts;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -837,8 +1571,259 @@ function CompsTable({ data, meta }) {
   );
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// AIRLINE CHART RENDERERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+function BookingCurveChart({ data, todayIdx, meta }) {
+  // Find the dtd label at the todayIdx for the reference line
+  const todayLabel = data[todayIdx]?.dtd;
+  return (
+    <ChartShell meta={meta}>
+      <ResponsiveContainer width="100%" height={280}>
+        <LineChart data={data} margin={{ top: 10, right: 30, bottom: 5, left: 0 }}>
+          <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
+          <XAxis dataKey="dtd" stroke={C.ink3} tick={{ fontSize: 11, fontFamily: F.body }} axisLine={{ stroke: C.line }} />
+          <YAxis stroke={C.ink3} tick={{ fontSize: 11, fontFamily: F.body }} axisLine={{ stroke: C.line }} />
+          <Tooltip contentStyle={{ background: C.card, border: `1px solid ${C.line}`, fontFamily: F.body, fontSize: 12 }} />
+          <ReferenceLine x={todayLabel} stroke={C.ink2} strokeDasharray="3 3" label={{ value: "Today", position: "top", fill: C.ink2, fontSize: 10, fontFamily: F.mono }} />
+          <Line type="monotone" dataKey="forecast" stroke={C.accent4} strokeWidth={2} dot={{ r: 3 }} strokeDasharray="6 3" name="Forecast" />
+          <Line type="monotone" dataKey="priorYear" stroke={C.ink3} strokeWidth={1.5} dot={{ r: 2 }} name="Prior Year" />
+          <Line type="monotone" dataKey="actual" stroke={C.accent} strokeWidth={2.5} dot={{ r: 3, fill: C.accent }} connectNulls={false} name="Actual" />
+        </LineChart>
+      </ResponsiveContainer>
+      <div style={{ display: "flex", gap: 18, justifyContent: "center", marginTop: 8, fontFamily: F.body, fontSize: 11, color: C.ink2 }}>
+        <span><span style={{ display: "inline-block", width: 12, height: 2, background: C.accent, marginRight: 6, verticalAlign: "middle" }} />Actual</span>
+        <span><span style={{ display: "inline-block", width: 12, height: 2, background: C.accent4, marginRight: 6, verticalAlign: "middle" }} />Forecast</span>
+        <span><span style={{ display: "inline-block", width: 12, height: 2, background: C.ink3, marginRight: 6, verticalAlign: "middle" }} />Prior Year</span>
+      </div>
+    </ChartShell>
+  );
+}
+
+function LfYieldScatterChart({ data, meta }) {
+  const colorMap = { over: C.bad, opt: C.good, prem: C.accent3, weak: C.ink3 };
+  return (
+    <ChartShell meta={meta}>
+      <ResponsiveContainer width="100%" height={300}>
+        <ScatterChart margin={{ top: 10, right: 30, bottom: 30, left: 10 }}>
+          <CartesianGrid stroke={C.line} strokeDasharray="2 4" />
+          <XAxis type="number" dataKey="lf" name="Load Factor" stroke={C.ink3} tick={{ fontSize: 11, fontFamily: F.body }} axisLine={{ stroke: C.line }} unit="%" domain={[50, 100]} label={{ value: "Load Factor (%)", position: "bottom", offset: 0, fill: C.ink2, fontSize: 11, fontFamily: F.body }} />
+          <YAxis type="number" dataKey="yield" name="Yield" stroke={C.ink3} tick={{ fontSize: 11, fontFamily: F.body }} axisLine={{ stroke: C.line }} unit="¢" domain={[8, 36]} label={{ value: "Yield (¢)", angle: -90, position: "insideLeft", fill: C.ink2, fontSize: 11, fontFamily: F.body }} />
+          <Tooltip
+            cursor={{ strokeDasharray: '3 3' }}
+            contentStyle={{ background: C.card, border: `1px solid ${C.line}`, fontFamily: F.body, fontSize: 12 }}
+            formatter={(value, name, props) => {
+              if (name === "Load Factor") return [`${value}%`, name];
+              if (name === "Yield") return [`${value}¢`, name];
+              return [value, name];
+            }}
+            labelFormatter={() => ""}
+            content={({ active, payload }) => {
+              if (!active || !payload?.length) return null;
+              const p = payload[0].payload;
+              return (
+                <div style={{ background: C.card, border: `1px solid ${C.line}`, padding: 8, fontFamily: F.body, fontSize: 12 }}>
+                  <div style={{ fontFamily: F.mono, color: C.ink, fontWeight: 500 }}>{p.name}</div>
+                  <div style={{ color: C.ink2 }}>LF: {p.lf}% · Yield: {p.yield}¢</div>
+                </div>
+              );
+            }}
+          />
+          <Scatter data={data}>
+            {data.map((d, i) => <Cell key={i} fill={colorMap[d.archetype] || C.ink2} />)}
+          </Scatter>
+        </ScatterChart>
+      </ResponsiveContainer>
+      <div style={{ fontFamily: F.mono, fontSize: 10, color: C.ink3, textAlign: "center", marginTop: 4 }}>
+        Hover any point to see the market name.
+      </div>
+    </ChartShell>
+  );
+}
+
+function FareClassMixChart({ data, meta }) {
+  // Render as a single horizontal stacked bar for clean readability of share
+  const total = data.reduce((a, b) => a + b.pct, 0);
+  return (
+    <ChartShell meta={meta}>
+      <div style={{ display: "flex", height: 56, borderRadius: 4, overflow: "hidden", border: `1px solid ${C.line}` }}>
+        {data.map((d, i) => (
+          <div key={d.class} style={{
+            flex: d.pct, background: d.color, display: "flex", alignItems: "center", justifyContent: "center",
+            color: "#fff", fontFamily: F.mono, fontSize: 12, fontWeight: 500,
+          }} title={`${d.class}: ${d.pct}%`}>
+            {d.pct > 6 ? d.class : ""}
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 16, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8 }}>
+        {data.map((d) => (
+          <div key={d.class} style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: F.mono, fontSize: 12 }}>
+            <span style={{ display: "inline-block", width: 12, height: 12, background: d.color }} />
+            <span style={{ color: C.ink, fontWeight: 500 }}>{d.class}</span>
+            <span style={{ color: C.ink2 }}>{d.pct}%</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 12, fontFamily: F.body, fontSize: 11, color: C.ink3, lineHeight: 1.5 }}>
+        Y = full fare · B/M/H = mid-tier discounts · K/L/Q/V = deep discounts (advance-purchase, restricted)
+      </div>
+    </ChartShell>
+  );
+}
+
+function CompetitiveFareLadderChart({ data, classes, meta }) {
+  // Find min for each class column for heat coloring
+  const colMins = classes.map((_, j) => Math.min(...data.map((d) => d.fares[j])));
+  return (
+    <ChartShell meta={meta}>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: F.mono, fontSize: 13 }}>
+          <thead>
+            <tr style={{ borderBottom: `1px solid ${C.line}` }}>
+              <th style={{ padding: "10px 12px", color: C.ink3, fontSize: 11, fontWeight: 500, textAlign: "left" }}>Carrier</th>
+              {classes.map((c) => (
+                <th key={c} style={{ padding: "10px 12px", color: C.ink3, fontSize: 11, fontWeight: 500, textAlign: "right" }}>{c}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {data.map((row) => (
+              <tr key={row.carrier} style={{ borderBottom: `1px dashed ${C.line}`, background: row.carrier === "AA" ? C.cardDim : "transparent" }}>
+                <td style={{ padding: "10px 12px", color: C.ink, fontWeight: 500 }}>
+                  {row.carrier}{row.carrier === "AA" && <span style={{ color: C.accent, fontSize: 10, marginLeft: 6 }}>← us</span>}
+                </td>
+                {row.fares.map((f, j) => {
+                  const isLowest = f === colMins[j];
+                  return (
+                    <td key={j} style={{
+                      padding: "10px 12px", textAlign: "right",
+                      color: isLowest ? C.good : C.ink2,
+                      fontWeight: isLowest ? 600 : 400,
+                    }}>
+                      ${f}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ marginTop: 12, fontFamily: F.body, fontSize: 11, color: C.ink3 }}>
+        Green/bold = lowest fare in that class. AA row highlighted.
+      </div>
+    </ChartShell>
+  );
+}
+
+function ForecastActualsChart({ data, meta }) {
+  return (
+    <ChartShell meta={meta}>
+      <ResponsiveContainer width="100%" height={260}>
+        <LineChart data={data} margin={{ top: 10, right: 30, bottom: 5, left: 0 }}>
+          <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
+          <XAxis dataKey="day" stroke={C.ink3} tick={{ fontSize: 11, fontFamily: F.body }} axisLine={{ stroke: C.line }} />
+          <YAxis stroke={C.ink3} tick={{ fontSize: 11, fontFamily: F.body }} axisLine={{ stroke: C.line }} />
+          <Tooltip contentStyle={{ background: C.card, border: `1px solid ${C.line}`, fontFamily: F.body, fontSize: 12 }} />
+          <Line type="monotone" dataKey="forecast" stroke={C.accent4} strokeWidth={2} dot={{ r: 3 }} strokeDasharray="6 3" name="Forecast" />
+          <Line type="monotone" dataKey="actual" stroke={C.accent} strokeWidth={2.5} dot={{ r: 3 }} name="Actual" />
+        </LineChart>
+      </ResponsiveContainer>
+      <div style={{ display: "flex", gap: 18, justifyContent: "center", marginTop: 8, fontFamily: F.body, fontSize: 11, color: C.ink2 }}>
+        <span><span style={{ display: "inline-block", width: 12, height: 2, background: C.accent, marginRight: 6, verticalAlign: "middle" }} />Actual Bookings</span>
+        <span><span style={{ display: "inline-block", width: 12, height: 2, background: C.accent4, marginRight: 6, verticalAlign: "middle" }} />Forecast</span>
+      </div>
+    </ChartShell>
+  );
+}
+
+function CapacityScheduleChart({ data, meta }) {
+  return (
+    <ChartShell meta={meta}>
+      <ResponsiveContainer width="100%" height={280}>
+        <ComposedChart data={data} margin={{ top: 10, right: 30, bottom: 5, left: 0 }}>
+          <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
+          <XAxis dataKey="route" stroke={C.ink3} tick={{ fontSize: 10, fontFamily: F.body }} axisLine={{ stroke: C.line }} />
+          <YAxis yAxisId="left" stroke={C.ink3} tick={{ fontSize: 11, fontFamily: F.body }} axisLine={{ stroke: C.line }} />
+          <YAxis yAxisId="right" orientation="right" stroke={C.ink3} tick={{ fontSize: 11, fontFamily: F.body }} axisLine={{ stroke: C.line }} unit="%" />
+          <Tooltip contentStyle={{ background: C.card, border: `1px solid ${C.line}`, fontFamily: F.body, fontSize: 12 }} />
+          <Bar yAxisId="left" dataKey="py" fill={C.ink3} name="Prior Year ASMs" radius={[2, 2, 0, 0]} />
+          <Bar yAxisId="left" dataKey="cy" fill={C.accent3} name="Current Year ASMs" radius={[2, 2, 0, 0]} />
+          <Line yAxisId="right" type="monotone" dataKey="change" stroke={C.accent} strokeWidth={2} dot={{ r: 4 }} name="YoY Change %" />
+        </ComposedChart>
+      </ResponsiveContainer>
+      <div style={{ display: "flex", gap: 18, justifyContent: "center", marginTop: 8, fontFamily: F.body, fontSize: 11, color: C.ink2 }}>
+        <span><span style={{ display: "inline-block", width: 10, height: 10, background: C.ink3, marginRight: 6 }} />Prior Year</span>
+        <span><span style={{ display: "inline-block", width: 10, height: 10, background: C.accent3, marginRight: 6 }} />Current Year</span>
+        <span><span style={{ display: "inline-block", width: 12, height: 2, background: C.accent, marginRight: 6, verticalAlign: "middle" }} />YoY %</span>
+      </div>
+    </ChartShell>
+  );
+}
+
+function RouteQuadrantChart({ data, meta }) {
+  const archColors = { star: C.good, question: C.accent3, cow: C.accent4, dog: C.bad };
+  return (
+    <ChartShell meta={meta}>
+      <ResponsiveContainer width="100%" height={320}>
+        <ScatterChart margin={{ top: 10, right: 30, bottom: 30, left: 10 }}>
+          <CartesianGrid stroke={C.line} strokeDasharray="2 4" />
+          <ReferenceLine x={0} stroke={C.ink3} strokeWidth={1} />
+          <ReferenceLine y={75} stroke={C.ink3} strokeWidth={1} />
+          <XAxis type="number" dataKey="revGrowth" name="Rev Growth" stroke={C.ink3} tick={{ fontSize: 11, fontFamily: F.body }} axisLine={{ stroke: C.line }} unit="%" domain={[-10, 25]} label={{ value: "Revenue Growth YoY (%)", position: "bottom", offset: 0, fill: C.ink2, fontSize: 11, fontFamily: F.body }} />
+          <YAxis type="number" dataKey="lf" name="LF" stroke={C.ink3} tick={{ fontSize: 11, fontFamily: F.body }} axisLine={{ stroke: C.line }} unit="%" domain={[55, 100]} label={{ value: "Load Factor (%)", angle: -90, position: "insideLeft", fill: C.ink2, fontSize: 11, fontFamily: F.body }} />
+          <ZAxis type="number" dataKey="asms" range={[100, 600]} />
+          <Tooltip
+            cursor={{ strokeDasharray: '3 3' }}
+            content={({ active, payload }) => {
+              if (!active || !payload?.length) return null;
+              const p = payload[0].payload;
+              return (
+                <div style={{ background: C.card, border: `1px solid ${C.line}`, padding: 8, fontFamily: F.body, fontSize: 12 }}>
+                  <div style={{ fontFamily: F.mono, color: C.ink, fontWeight: 500 }}>{p.route}</div>
+                  <div style={{ color: C.ink2 }}>Rev Growth: {p.revGrowth}% · LF: {p.lf}%</div>
+                  <div style={{ color: C.ink2 }}>ASMs: {p.asms}M</div>
+                </div>
+              );
+            }}
+          />
+          <Scatter data={data}>
+            {data.map((d, i) => <Cell key={i} fill={archColors[d.archetype] || C.ink2} fillOpacity={0.7} />)}
+          </Scatter>
+        </ScatterChart>
+      </ResponsiveContainer>
+    </ChartShell>
+  );
+}
+
+function MentalMathCard({ meta }) {
+  // Visual treatment is intentionally minimal — this isn't a chart, it's a calculation card
+  return (
+    <ChartShell meta={meta}>
+      <div style={{
+        padding: "40px 20px", textAlign: "center",
+        background: `linear-gradient(135deg, ${C.cardDim} 0%, ${C.card} 100%)`,
+        border: `1px dashed ${C.line}`, borderRadius: 4,
+      }}>
+        <div style={{ fontFamily: F.mono, fontSize: 11, color: C.ink3, letterSpacing: 3, textTransform: "uppercase", marginBottom: 12 }}>
+          Pencil-and-paper banned · 30 seconds
+        </div>
+        <div style={{ fontFamily: F.display, fontSize: 28, color: C.ink, fontWeight: 500, letterSpacing: -0.3 }}>
+          Quick calculation
+        </div>
+        <div style={{ fontFamily: F.body, fontSize: 13, color: C.ink2, maxWidth: 460, margin: "12px auto 0", lineHeight: 1.5 }}>
+          The next question is mental math — exactly the kind interviewers ask live. Round freely; the closest option wins.
+        </div>
+      </div>
+    </ChartShell>
+  );
+}
+
 function renderChart(chart) {
   switch (chart.type) {
+    // General finance charts
     case "revenueMargin": return <RevenueMarginChart {...chart} />;
     case "cashWaterfall": return <WaterfallChart {...chart} />;
     case "marginBridge": return <WaterfallChart {...chart} />;
@@ -847,6 +1832,17 @@ function renderChart(chart) {
     case "workingCapital": return <WorkingCapitalChart {...chart} />;
     case "balanceSheet": return <BalanceSheetChart {...chart} />;
     case "comps": return <CompsTable {...chart} />;
+    // Airline charts
+    case "bookingCurve": return <BookingCurveChart {...chart} />;
+    case "lfYieldScatter": return <LfYieldScatterChart {...chart} />;
+    case "fareClassMix": return <FareClassMixChart {...chart} />;
+    case "competitiveFareLadder": return <CompetitiveFareLadderChart {...chart} />;
+    case "rasmBridge": return <WaterfallChart {...chart} />;
+    case "forecastActuals": return <ForecastActualsChart {...chart} />;
+    case "capacitySchedule": return <CapacityScheduleChart {...chart} />;
+    case "routeQuadrant": return <RouteQuadrantChart {...chart} />;
+    // Mental math
+    case "mentalMath": return <MentalMathCard {...chart} />;
     default: return null;
   }
 }
@@ -856,37 +1852,41 @@ function renderChart(chart) {
 // ═══════════════════════════════════════════════════════════════════════════
 const DAILY_LIMIT = 5;
 
-function Home({ profile, onStart, onReset, loading }) {
+function Home({ profile, onStart, onReset, onModeChange, loading }) {
   const today = new Date().toISOString().slice(0, 10);
   const isNewDay = profile.testsDate !== today;
   const testsLeft = isNewDay ? DAILY_LIMIT : Math.max(0, DAILY_LIMIT - profile.testsToday);
 
-  const sorted = SKILL_LIST.map((s) => ({
+  const mode = profile.mode || "airline";
+  const active = activeProfile(profile);
+  const skillList = skillsForMode(mode);
+
+  const sorted = skillList.map((s) => ({
     skill: s,
-    ability: profile.ability[s],
-    attempts: profile.attempts[s] || 0,
+    ability: active.ability[s] ?? 0.4,
+    attempts: active.attempts[s] || 0,
   })).sort((a, b) => a.ability - b.ability);
 
   const overall = round(
-    SKILL_LIST.reduce((sum, s) => sum + profile.ability[s], 0) / SKILL_LIST.length * 100, 0
+    skillList.reduce((sum, s) => sum + (active.ability[s] ?? 0.4), 0) / skillList.length * 100, 0
   );
 
   return (
     <div style={{ maxWidth: 980, margin: "0 auto", padding: "60px 32px 80px" }}>
       <div style={{ marginBottom: 48 }}>
         <div style={{ fontFamily: F.mono, fontSize: 10, color: C.ink3, letterSpacing: 2, textTransform: "uppercase" }}>
-          Daily Practice · Financial Chart Reading
+          {mode === "airline" ? "Airline Revenue Management · Interview Prep" : "Daily Practice · Financial Chart Reading"}
         </div>
         <h1 style={{
           fontFamily: F.display, fontSize: 56, lineHeight: 1.05, color: C.ink,
           margin: "12px 0 16px", fontWeight: 500, letterSpacing: -1.2,
         }}>
-          Train your eye.<br />
-          <em style={{ color: C.accent }}>Read the numbers.</em>
+          {mode === "airline" ? <>Read the booking curve.<br /><em style={{ color: C.accent }}>Run the route.</em></>
+                              : <>Train your eye.<br /><em style={{ color: C.accent }}>Read the numbers.</em></>}
         </h1>
         <p style={{ fontFamily: F.body, fontSize: 16, color: C.ink2, maxWidth: 560, lineHeight: 1.6 }}>
-          A timed assessment for finance and accounting interviews. Each session presents three charts or tables
-          modeled on the questions analysts actually face. Your responses reshape what comes next.
+          A timed assessment {mode === "airline" ? "for airline revenue management interviews" : "for finance and accounting interviews"}. Each session presents three charts or tables
+          modeled on the questions analysts actually face{mode === "airline" ? ", plus a mental-math card mid-session" : ""}. Your responses reshape what comes next.
         </p>
       </div>
 
@@ -971,6 +1971,56 @@ function Home({ profile, onStart, onReset, loading }) {
       </div>
 
       <div style={{ marginTop: 48, paddingTop: 32, borderTop: `1px solid ${C.line}` }}>
+        <div style={{ fontFamily: F.mono, fontSize: 10, color: C.ink3, letterSpacing: 2, textTransform: "uppercase", marginBottom: 12 }}>
+          Practice Mode
+        </div>
+        <div style={{
+          background: C.card, border: `1px solid ${C.line}`, padding: 20, borderRadius: 4,
+          display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16, flexWrap: "wrap",
+          marginBottom: 24,
+        }}>
+          <div style={{ flex: "1 1 280px" }}>
+            <div style={{ fontFamily: F.display, fontSize: 18, color: C.ink, fontWeight: 500, marginBottom: 4 }}>
+              {mode === "airline" ? "Airline Revenue Management" : "General Finance & Accounting"}
+            </div>
+            <div style={{ fontFamily: F.body, fontSize: 13, color: C.ink2, lineHeight: 1.5 }}>
+              {mode === "airline"
+                ? "Booking curves, LF/yield, fare class mix, RASM, demand forecasting, and 12 other RM skills."
+                : "Revenue trends, margin bridges, cohort retention, DCF sensitivity, and 8 other finance skills."}
+              <br />
+              <span style={{ color: C.ink3, fontSize: 12 }}>
+                Switching modes preserves your record in both. Daily test limit ({DAILY_LIMIT}) is shared.
+              </span>
+            </div>
+          </div>
+          <div style={{ display: "flex", background: C.cardDim, padding: 4, borderRadius: 4, border: `1px solid ${C.line}` }}>
+            <button
+              onClick={() => mode !== "airline" && onModeChange("airline")}
+              style={{
+                padding: "10px 20px", border: "none", borderRadius: 3, cursor: "pointer",
+                background: mode === "airline" ? C.ink : "transparent",
+                color: mode === "airline" ? C.bg : C.ink2,
+                fontFamily: F.body, fontSize: 13, fontWeight: 500, letterSpacing: 0.3,
+                transition: "background 0.15s, color 0.15s",
+              }}
+            >
+              Airlines
+            </button>
+            <button
+              onClick={() => mode !== "general" && onModeChange("general")}
+              style={{
+                padding: "10px 20px", border: "none", borderRadius: 3, cursor: "pointer",
+                background: mode === "general" ? C.ink : "transparent",
+                color: mode === "general" ? C.bg : C.ink2,
+                fontFamily: F.body, fontSize: 13, fontWeight: 500, letterSpacing: 0.3,
+                transition: "background 0.15s, color 0.15s",
+              }}
+            >
+              General
+            </button>
+          </div>
+        </div>
+
         <div style={{ fontFamily: F.mono, fontSize: 10, color: C.ink3, letterSpacing: 2, textTransform: "uppercase", marginBottom: 12 }}>
           Profile Management
         </div>
@@ -1323,11 +2373,16 @@ function Results({ answers, profile, prevProfile, onHome }) {
   const total = answers.length;
   const score = round((correct / Math.max(total, 1)) * 100, 0);
 
-  const deltas = SKILL_LIST.map((s) => ({
+  const mode = profile.mode || "airline";
+  const active = activeProfile(profile);
+  const prevActive = activeProfile(prevProfile);
+  const skillList = skillsForMode(mode);
+
+  const deltas = skillList.map((s) => ({
     skill: s,
-    before: prevProfile.ability[s],
-    after: profile.ability[s],
-    delta: profile.ability[s] - prevProfile.ability[s],
+    before: prevActive.ability[s] ?? 0.4,
+    after: active.ability[s] ?? 0.4,
+    delta: (active.ability[s] ?? 0.4) - (prevActive.ability[s] ?? 0.4),
     attempts: answers.filter((a) => a.skills.includes(s)).length,
   })).filter((d) => d.attempts > 0).sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
 
@@ -1446,7 +2501,47 @@ function Results({ answers, profile, prevProfile, onHome }) {
 // ═══════════════════════════════════════════════════════════════════════════
 // APP ROOT — persistence, routing, daily reset
 // ═══════════════════════════════════════════════════════════════════════════
-const STORAGE_KEY = "finchart_profile_v1";
+const STORAGE_KEY = "finchart_profile_v2";  // bumped from v1 to trigger migration
+
+// Migrate v1 (flat profile) data into v2's generalProfile slot
+function migrateV1IfNeeded(parsed) {
+  if (parsed.airlineProfile && parsed.generalProfile) return parsed;  // already v2
+  // v1 had: { ability, attempts, correct, testsToday, testsDate, history }
+  if (parsed.ability) {
+    return {
+      mode: "airline",
+      airlineProfile: makeModeProfile(AIRLINE_SKILL_LIST),
+      generalProfile: {
+        ability: { ...makeModeProfile(SKILL_LIST).ability, ...parsed.ability },
+        attempts: { ...makeModeProfile(SKILL_LIST).attempts, ...parsed.attempts },
+        correct: { ...makeModeProfile(SKILL_LIST).correct, ...parsed.correct },
+        history: parsed.history || [],
+      },
+      testsToday: parsed.testsToday || 0,
+      testsDate: parsed.testsDate || new Date().toISOString().slice(0, 10),
+    };
+  }
+  return parsed;
+}
+
+// Ensure all skills for both modes are present (heals schema drift)
+function healProfile(p) {
+  const healed = { ...p };
+  if (!healed.airlineProfile) healed.airlineProfile = makeModeProfile(AIRLINE_SKILL_LIST);
+  if (!healed.generalProfile) healed.generalProfile = makeModeProfile(SKILL_LIST);
+  AIRLINE_SKILL_LIST.forEach((s) => {
+    if (healed.airlineProfile.ability[s] === undefined) healed.airlineProfile.ability[s] = 0.4;
+    if (healed.airlineProfile.attempts[s] === undefined) healed.airlineProfile.attempts[s] = 0;
+    if (healed.airlineProfile.correct[s] === undefined) healed.airlineProfile.correct[s] = 0;
+  });
+  SKILL_LIST.forEach((s) => {
+    if (healed.generalProfile.ability[s] === undefined) healed.generalProfile.ability[s] = 0.4;
+    if (healed.generalProfile.attempts[s] === undefined) healed.generalProfile.attempts[s] = 0;
+    if (healed.generalProfile.correct[s] === undefined) healed.generalProfile.correct[s] = 0;
+  });
+  if (!healed.mode) healed.mode = "airline";
+  return healed;
+}
 
 export default function App() {
   const [screen, setScreen] = useState("loading");
@@ -1458,19 +2553,17 @@ export default function App() {
 
   useEffect(() => {
     try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        let parsed = JSON.parse(stored);
+      // Try v2 first, then fall back to v1 for migration
+      let raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) raw = localStorage.getItem("finchart_profile_v1");
+      if (raw) {
+        let parsed = JSON.parse(raw);
+        parsed = migrateV1IfNeeded(parsed);
+        parsed = healProfile(parsed);
         const today = new Date().toISOString().slice(0, 10);
         if (parsed.testsDate !== today) {
           parsed = { ...parsed, testsToday: 0, testsDate: today };
         }
-        const def = DEFAULT_PROFILE();
-        SKILL_LIST.forEach((s) => {
-          if (parsed.ability[s] === undefined) parsed.ability[s] = def.ability[s];
-          if (parsed.attempts[s] === undefined) parsed.attempts[s] = 0;
-          if (parsed.correct[s] === undefined) parsed.correct[s] = 0;
-        });
         setProfile(parsed);
       }
     } catch (e) {
@@ -1491,7 +2584,8 @@ export default function App() {
     setLoading(true);
     const seed = Date.now() & 0xffffffff;
     const rng = mulberry32(seed);
-    const newCharts = buildTest(profile, rng);
+    const mode = profile.mode || "airline";
+    const newCharts = buildTest(activeProfile(profile), rng, mode);
     setCharts(newCharts);
     setPrevProfile(JSON.parse(JSON.stringify(profile)));
     setTimeout(() => {
@@ -1501,22 +2595,28 @@ export default function App() {
   };
 
   const completeTest = async (sessionAnswers) => {
-    let updated = { ...profile };
+    const mode = profile.mode || "airline";
+    const modeKey = mode === "airline" ? "airlineProfile" : "generalProfile";
+    let activeUpdated = profile[modeKey];
     sessionAnswers.forEach((a) => {
-      updated = updateAbility(updated, a.skills, a.correct, a.difficulty);
+      activeUpdated = updateAbility(activeUpdated, a.skills, a.correct, a.difficulty);
     });
-    updated = {
-      ...updated,
-      testsToday: (updated.testsToday || 0) + 1,
-      testsDate: new Date().toISOString().slice(0, 10),
+    activeUpdated = {
+      ...activeUpdated,
       history: [
-        ...(updated.history || []),
+        ...(activeUpdated.history || []),
         {
           date: new Date().toISOString(),
           correct: sessionAnswers.filter((a) => a.correct).length,
           total: sessionAnswers.length,
         },
       ].slice(-30),
+    };
+    const updated = {
+      ...profile,
+      [modeKey]: activeUpdated,
+      testsToday: (profile.testsToday || 0) + 1,
+      testsDate: new Date().toISOString().slice(0, 10),
     };
     setProfile(updated);
     setAnswers(sessionAnswers);
@@ -1525,7 +2625,6 @@ export default function App() {
   };
 
   const exitTest = async () => {
-    // Abandoning still consumes a daily test so this can't be used to reroll charts
     const updated = {
       ...profile,
       testsToday: (profile.testsToday || 0) + 1,
@@ -1550,6 +2649,12 @@ export default function App() {
     setCharts(null);
     setAnswers(null);
     setScreen("home");
+  };
+
+  const changeMode = async (newMode) => {
+    const updated = { ...profile, mode: newMode };
+    setProfile(updated);
+    save(updated);
   };
 
   if (screen === "loading") {
@@ -1587,7 +2692,7 @@ export default function App() {
               letterSpacing: 2, textTransform: "uppercase",
               borderLeft: `1px solid ${C.line}`, paddingLeft: 12, marginLeft: 4,
             }}>
-              Chart Reading · Beta
+              {(profile.mode || "airline") === "airline" ? "RM Interview Prep" : "Chart Reading"} · Beta
             </div>
           </div>
           <div style={{ fontFamily: F.mono, fontSize: 10, color: C.ink3, letterSpacing: 1.5 }}>
@@ -1595,7 +2700,7 @@ export default function App() {
           </div>
         </div>
 
-        {screen === "home" && <Home profile={profile} onStart={startTest} onReset={resetProfile} loading={loading} />}
+        {screen === "home" && <Home profile={profile} onStart={startTest} onReset={resetProfile} onModeChange={changeMode} loading={loading} />}
         {screen === "test" && charts && <TestRunner charts={charts} onComplete={completeTest} onExit={exitTest} />}
         {screen === "results" && answers && (
           <Results
